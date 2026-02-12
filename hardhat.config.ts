@@ -61,6 +61,11 @@ const config: HardhatUserConfig = {
       chainId: 44787,
       accounts: accounts('celo_alfajores'),
     },
+    celo_sepolia: {
+      url: 'https://forno.celo-sepolia.celo-testnet.org',
+      chainId: 11142220,
+      accounts: accounts('celo_sepolia'),
+    },
   }),
   paths: {
     sources: 'contracts',
