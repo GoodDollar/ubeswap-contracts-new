@@ -5,6 +5,9 @@ artifacts/
 
 coverage*
 typechain/
+temp/
+scripts/
+commands.txt
 
 .vscode/*
 !.vscode/settings.json
@@ -18,4 +21,5 @@ contractsInfo.json
 deployments/hardhat
 deployments/localhost
 
+.DS_Store
 /.dapp
