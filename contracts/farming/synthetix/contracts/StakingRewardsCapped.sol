@@ -54,6 +54,9 @@ contract StakingRewardsCapped is IStakingRewards, RewardsDistributionRecipient, 
         address _stakingToken,
         uint256 _maxRewardRatePerToken
     ) Owned(_owner) {
+        require(_rewardsToken != address(0), "Rewards token cannot be zero address");
+        require(_stakingToken != address(0), "Staking token cannot be zero address");
+        require(_rewardsDistribution != address(0), "Rewards distribution cannot be zero address");
         rewardsToken = IERC20(_rewardsToken);
         stakingToken = IERC20(_stakingToken);
         rewardsDistribution = _rewardsDistribution;
@@ -158,13 +161,14 @@ contract StakingRewardsCapped is IStakingRewards, RewardsDistributionRecipient, 
 
     /* ========== RESTRICTED FUNCTIONS ========== */
 
-    function notifyRewardAmount(uint256 reward) external override onlyRewardsDistribution updateReward(address(0)) {
+    function notifyRewardAmount(uint256 reward) external override onlyRewardsDistribution nonReentrant updateReward(address(0)) {
         _addReward(reward);
     }
 
     // Permissionless: anyone may add rewards by transferring tokens directly into the contract
     // and calling this function. Withheld rewards are automatically recycled.
     function addToReward(uint256 reward) external nonReentrant updateReward(address(0)) {
+        require(reward > 0, "Cannot add 0 reward");
         rewardsToken.safeTransferFrom(msg.sender, address(this), reward);
         _addReward(reward);
     }
@@ -208,6 +212,7 @@ contract StakingRewardsCapped is IStakingRewards, RewardsDistributionRecipient, 
     // Added to support recovering LP Rewards from other systems such as BAL to be distributed to holders
     function recoverERC20(address tokenAddress, uint256 tokenAmount) external onlyOwner {
         require(tokenAddress != address(stakingToken), "Cannot withdraw the staking token");
+        require(tokenAddress != address(rewardsToken), "Cannot withdraw the rewards token");
         IERC20(tokenAddress).safeTransfer(owner, tokenAmount);
         emit Recovered(tokenAddress, tokenAmount);
     }
@@ -248,8 +253,10 @@ contract StakingRewardsCapped is IStakingRewards, RewardsDistributionRecipient, 
             if (rewardRate > effectiveRate) {
                 uint256 timeElapsed = currentTime - lastUpdateTime;
                 uint256 withheldAmount = (rewardRate - effectiveRate) * timeElapsed;
-                withheldRewards += withheldAmount;
-                emit RewardCapped(rewardRate, effectiveRate, withheldAmount);
+                if (withheldAmount > 0) {
+                    withheldRewards += withheldAmount;
+                    emit RewardCapped(rewardRate, effectiveRate, withheldAmount);
+                }
             }
         }
 

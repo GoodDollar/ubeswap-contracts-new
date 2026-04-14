@@ -109,6 +109,45 @@ describe("StakingRewardsCapped", function () {
     it("has zero totalSupply initially", async function () {
       expect(await staking.totalSupply()).to.equal(0);
     });
+
+    it("reverts if rewardsToken is zero address", async function () {
+      const StakingRewardsCapped = await ethers.getContractFactory("StakingRewardsCapped");
+      await expect(
+        StakingRewardsCapped.deploy(
+          owner.address,
+          rewardsDistribution.address,
+          ethers.constants.AddressZero, // rewardsToken
+          stakingToken.address,
+          MAX_REWARD_RATE_PER_TOKEN
+        )
+      ).to.be.revertedWith("Rewards token cannot be zero address");
+    });
+
+    it("reverts if stakingToken is zero address", async function () {
+      const StakingRewardsCapped = await ethers.getContractFactory("StakingRewardsCapped");
+      await expect(
+        StakingRewardsCapped.deploy(
+          owner.address,
+          rewardsDistribution.address,
+          rewardsToken.address,
+          ethers.constants.AddressZero, // stakingToken
+          MAX_REWARD_RATE_PER_TOKEN
+        )
+      ).to.be.revertedWith("Staking token cannot be zero address");
+    });
+
+    it("reverts if rewardsDistribution is zero address", async function () {
+      const StakingRewardsCapped = await ethers.getContractFactory("StakingRewardsCapped");
+      await expect(
+        StakingRewardsCapped.deploy(
+          owner.address,
+          ethers.constants.AddressZero, // rewardsDistribution
+          rewardsToken.address,
+          stakingToken.address,
+          MAX_REWARD_RATE_PER_TOKEN
+        )
+      ).to.be.revertedWith("Rewards distribution cannot be zero address");
+    });
   });
 
   /* ========== STAKE ========== */
@@ -360,6 +399,12 @@ describe("StakingRewardsCapped", function () {
       await expect(
         staking.connect(noAllowanceUser).addToReward(REWARD_AMOUNT)
       ).to.be.reverted;
+    });
+
+    it("reverts when reward is 0", async function () {
+      await expect(
+        staking.connect(anyUser).addToReward(0)
+      ).to.be.revertedWith("Cannot add 0 reward");
     });
 
     it("can be called by rewardsDistribution too", async function () {
@@ -634,6 +679,117 @@ describe("StakingRewardsCapped", function () {
       await expect(
         staking.connect(owner).setRewardsDuration(14 * 24 * 60 * 60)
       ).to.be.revertedWith("Previous rewards period must be complete");
+    });
+  });
+
+  /* ========== RECOVER ERC20 ========== */
+
+  describe("recoverERC20()", function () {
+    it("only owner can call", async function () {
+      const ERC20Mock = await ethers.getContractFactory("ERC20Mock");
+      const otherToken = await ERC20Mock.deploy(
+        "Other",
+        "OTH",
+        ethers.utils.parseEther("1000")
+      );
+      await otherToken.transfer(staking.address, ethers.utils.parseEther("10"));
+      await expect(
+        staking.connect(anyUser).recoverERC20(otherToken.address, ethers.utils.parseEther("10"))
+      ).to.be.revertedWith("Only the contract owner may perform this action");
+    });
+
+    it("reverts when trying to recover staking token", async function () {
+      await expect(
+        staking.connect(owner).recoverERC20(stakingToken.address, 1)
+      ).to.be.revertedWith("Cannot withdraw the staking token");
+    });
+
+    it("reverts when trying to recover rewards token", async function () {
+      await expect(
+        staking.connect(owner).recoverERC20(rewardsToken.address, 1)
+      ).to.be.revertedWith("Cannot withdraw the rewards token");
+    });
+
+    it("allows recovering an unrelated token", async function () {
+      const ERC20Mock = await ethers.getContractFactory("ERC20Mock");
+      const otherToken = await ERC20Mock.deploy(
+        "Other",
+        "OTH",
+        ethers.utils.parseEther("1000")
+      );
+      const recoverAmount = ethers.utils.parseEther("50");
+      await otherToken.transfer(staking.address, recoverAmount);
+
+      await expect(
+        staking.connect(owner).recoverERC20(otherToken.address, recoverAmount)
+      )
+        .to.emit(staking, "Recovered")
+        .withArgs(otherToken.address, recoverAmount);
+
+      expect(await otherToken.balanceOf(staking.address)).to.equal(0);
+    });
+  });
+
+  /* ========== REWARD CAPPED EVENT ========== */
+
+  describe("RewardCapped event", function () {
+    it("does not emit RewardCapped with withheldAmount=0 when timeElapsed is 0", async function () {
+      // Fund and start rewards with cap active
+      await rewardsToken
+        .connect(rewardsDistribution)
+        .transfer(staking.address, REWARD_AMOUNT);
+      await staking
+        .connect(rewardsDistribution)
+        .notifyRewardAmount(REWARD_AMOUNT);
+
+      // First stake — sets lastUpdateTime to the current block timestamp
+      await staking.connect(staker1).stake(ethers.utils.parseEther("1"));
+
+      // Advance time so there will be real withheld rewards on the FIRST tx in the next block
+      await increaseTime(60);
+
+      // Disable automine so the next two transactions share the same block.timestamp
+      await ethers.provider.send("evm_setAutomine", [false]);
+      let tx1Hash, tx2Hash;
+      try {
+        // tx1: first stake in the shared block — timeElapsed > 0, emits RewardCapped with amount > 0
+        const tx1Response = await staking.connect(staker1).stake(1);
+        tx1Hash = tx1Response.hash;
+
+        // tx2: second stake in the SAME block — timeElapsed == 0, withheldAmount == 0, must NOT emit RewardCapped
+        const tx2Response = await staking.connect(staker2).stake(1);
+        tx2Hash = tx2Response.hash;
+
+        // Mine both transactions in a single block
+        await ethers.provider.send("evm_mine", []);
+      } finally {
+        await ethers.provider.send("evm_setAutomine", [true]);
+      }
+
+      // Get receipts for both transactions
+      const receipt1 = await ethers.provider.getTransactionReceipt(tx1Hash);
+      const receipt2 = await ethers.provider.getTransactionReceipt(tx2Hash);
+
+      // Both should have landed in the same block
+      expect(receipt1.blockNumber).to.equal(receipt2.blockNumber);
+
+      // Helper: parse RewardCapped events from a receipt
+      const rewardCappedTopic = staking.interface.getEventTopic("RewardCapped");
+      const getRewardCappedEvents = (receipt) =>
+        receipt.logs
+          .filter((l) => l.topics[0] === rewardCappedTopic)
+          .map((l) => staking.interface.parseLog(l));
+
+      const events1 = getRewardCappedEvents(receipt1);
+      const events2 = getRewardCappedEvents(receipt2);
+
+      // tx1 should have emitted RewardCapped with a positive withheldAmount (time elapsed since last update)
+      expect(events1.length).to.equal(1);
+      expect(events1[0].args.withheldAmount).to.be.gt(0);
+
+      // tx2 shares the same timestamp as tx1 → timeElapsed == 0 → withheldAmount == 0
+      // Our fix prevents emitting the event entirely in this case
+      expect(events2.length).to.equal(0);
     });
   });
 });
