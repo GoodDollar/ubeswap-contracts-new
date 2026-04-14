@@ -125,6 +125,15 @@ contract StakingRewardsCapped is IStakingRewards, RewardsDistributionRecipient, 
         emit Staked(msg.sender, amount);
     }
 
+    function stakeFor(uint256 amount, address recipient) external nonReentrant updateReward(recipient) {
+        require(amount > 0, "Cannot stake 0");
+        require(recipient != address(0), "Cannot stake for zero address");
+        _totalSupply += amount;
+        _balances[recipient] += amount;
+        stakingToken.safeTransferFrom(msg.sender, address(this), amount);
+        emit StakedFor(msg.sender, recipient, amount);
+    }
+
     function withdraw(uint256 amount) public override nonReentrant updateReward(msg.sender) {
         require(amount > 0, "Cannot withdraw 0");
         _totalSupply -= amount;
@@ -150,24 +159,45 @@ contract StakingRewardsCapped is IStakingRewards, RewardsDistributionRecipient, 
     /* ========== RESTRICTED FUNCTIONS ========== */
 
     function notifyRewardAmount(uint256 reward) external override onlyRewardsDistribution updateReward(address(0)) {
+        _addReward(reward);
+    }
+
+    // Permissionless: anyone may add rewards by transferring tokens directly into the contract
+    // and calling this function. Withheld rewards are automatically recycled.
+    function addToReward(uint256 reward) external nonReentrant updateReward(address(0)) {
+        rewardsToken.safeTransferFrom(msg.sender, address(this), reward);
+        _addReward(reward);
+    }
+
+    // Internal helper: recycle any withheld rewards and apply the combined new reward amount.
+    function _addReward(uint256 newReward) internal {
+        // Recycle any previously withheld rewards back into the pool.
+        uint256 recycled = withheldRewards;
+        if (recycled > 0) {
+            withheldRewards = 0;
+            emit WithheldRewardsRecycled(recycled);
+        }
+
+        uint256 totalReward = newReward + recycled;
+
         if (block.timestamp >= periodFinish) {
-            rewardRate = reward / rewardsDuration;
+            rewardRate = totalReward / rewardsDuration;
         } else {
             uint256 remaining = periodFinish - block.timestamp;
             uint256 leftover = remaining * rewardRate;
-            rewardRate = (reward + leftover) / rewardsDuration;
+            rewardRate = (totalReward + leftover) / rewardsDuration;
         }
 
         // Ensure the provided reward amount is not more than the balance in the contract.
         // This keeps the reward rate in the right range, preventing overflows due to
         // very high values of rewardRate in the earned and rewardsPerToken functions;
         // Reward + leftover must be less than 2^256 / 10^18 to avoid overflow.
-        uint balance = rewardsToken.balanceOf(address(this));
+        uint256 balance = rewardsToken.balanceOf(address(this));
         require(rewardRate <= (balance / rewardsDuration), "Provided reward too high");
 
         lastUpdateTime = block.timestamp;
         periodFinish = block.timestamp + rewardsDuration;
-        emit RewardAdded(reward);
+        emit RewardAdded(totalReward);
     }
 
     // End rewards emission earlier
@@ -236,6 +266,7 @@ contract StakingRewardsCapped is IStakingRewards, RewardsDistributionRecipient, 
 
     event RewardAdded(uint256 reward);
     event Staked(address indexed user, uint256 amount);
+    event StakedFor(address indexed staker, address indexed recipient, uint256 amount);
     event Withdrawn(address indexed user, uint256 amount);
     event RewardPaid(address indexed user, uint256 reward);
     event RewardsDurationUpdated(uint256 newDuration);
@@ -243,4 +274,5 @@ contract StakingRewardsCapped is IStakingRewards, RewardsDistributionRecipient, 
     event RewardCapped(uint256 originalRate, uint256 cappedRate, uint256 withheldAmount);
     event MaxRewardRateUpdated(uint256 newMaxRate);
     event WithheldRewardsWithdrawn(uint256 amount);
+    event WithheldRewardsRecycled(uint256 amount);
 }
